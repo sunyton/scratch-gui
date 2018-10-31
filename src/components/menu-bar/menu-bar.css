@@ -47,13 +47,15 @@
 
 .language-icon {
     height:  1.5rem;
+    vertical-align: middle;
 }
 
 .language-caret {
-    margin-bottom: .625rem;
+    margin: 0 .125rem;
 }
 
 .language-menu {
+    box-sizing: border-box;
     display: inline-flex;
     width: $language-selector-width;
 }
@@ -100,6 +102,10 @@
     padding: 0 0.75rem;
 }
 
+.menu-bar-item.language-menu {
+    padding: 0 0.5rem;
+}
+
 .menu-bar-menu {
     margin-top: $menu-bar-height;
     z-index: $z-index-menu-bar;
@@ -120,18 +126,31 @@
     height: 34px;
 }
 
+.menu-bar-button {
+    height: 2rem;
+}
+
 .share-button {
     background: $data-primary;
-    height: 32px;
-    box-shadow: 0 0 0 1px $ui-black-transparent;
+}
+
+.share-button-is-shared {
+    background: $ui-black-transparent;
 }
 
 .community-button {
-    height: 32px;
     box-shadow: 0 0 0 1px $ui-black-transparent;
 }
 
 .community-button-icon {
+    height: 1.25rem;
+}
+
+.remix-button {
+    background-color: $pen-primary
+}
+
+.remix-button-icon {
     height: 1.25rem;
 }
 

@@ -5,6 +5,7 @@
 
 import tutorials from './libraries/decks/index.jsx';
 import analytics from './analytics';
+import queryString from 'query-string';
 
 /**
  * Get the tutorial id from the given numerical id (representing the
@@ -34,13 +35,12 @@ const getDeckIdFromUrlId = urlId => {
  * requested or found.
  */
 const detectTutorialId = () => {
-    if (window.location.search.indexOf('tutorial=') !== -1) {
-        const urlTutorialId = window.location.search.match(/(?:tutorial)=(\d+)/)[1];
-        if (urlTutorialId) {
-            return getDeckIdFromUrlId(Number(urlTutorialId));
-        }
-    }
-    return null;
+    const queryParams = queryString.parse(location.search);
+    const tutorialID = Array.isArray(queryParams.tutorial) ?
+        queryParams.tutorial[0] :
+        queryParams.tutorial;
+    if (typeof tutorialID === 'undefined') return null;
+    return getDeckIdFromUrlId(tutorialID);
 };
 
 export {
