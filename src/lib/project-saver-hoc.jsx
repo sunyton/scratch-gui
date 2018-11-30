@@ -1,10 +1,19 @@
+import bindAll from 'lodash.bindall';
 import React from 'react';
 import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
 import VM from 'scratch-vm';
 
+import log from '../lib/log';
 import storage from '../lib/storage';
-import {showStandardAlert} from '../reducers/alerts';
+import dataURItoBlob from '../lib/data-uri-to-blob';
+
+import {
+    showAlertWithTimeout,
+    showStandardAlert
+} from '../reducers/alerts';
+import {setAutoSaveTimeoutId} from '../reducers/timeout';
+import {setProjectUnchanged} from '../reducers/project-changed';
 import {
     LoadingStates,
     autoUpdateProject,
@@ -18,7 +27,6 @@ import {
     getIsShowingWithId,
     getIsShowingWithoutId,
     getIsUpdating,
-    manualUpdateProject,
     projectError
 } from '../reducers/project-state';
 
@@ -33,7 +41,16 @@ import {
  */
 const ProjectSaverHOC = function (WrappedComponent) {
     class ProjectSaverComponent extends React.Component {
+        constructor (props) {
+            super(props);
+            bindAll(this, [
+                'tryToAutoSave'
+            ]);
+        }
         componentDidUpdate (prevProps) {
+            if (this.props.projectChanged && !prevProps.projectChanged) {
+                this.scheduleAutoSave();
+            }
             if (this.props.isUpdating && !prevProps.isUpdating) {
                 this.updateProjectToStorage();
             }
@@ -47,56 +64,76 @@ const ProjectSaverHOC = function (WrappedComponent) {
                 this.createRemixToStorage();
             }
 
-            // check if the project state, and user capabilities, have changed so as to indicate
-            // that we should create or update project
+            // see if we should "create" the current project on the server
             //
-            // if we're newly able to create this project on the server, create it!
-            const showingCreateable = this.props.canCreateNew && this.props.isShowingWithoutId;
-            const prevShowingCreateable = prevProps.canCreateNew && prevProps.isShowingWithoutId;
-            if (showingCreateable && !prevShowingCreateable) {
+            // don't try to create or save immediately after trying to create
+            if (prevProps.isCreatingNew) return;
+            // if we're newly able to create this project, create it!
+            if (this.isShowingCreatable(this.props) && !this.isShowingCreatable(prevProps)) {
                 this.props.onCreateProject();
-            } else {
-                // if we're newly able to save this project, save it!
-                const showingSaveable = this.props.canSave && this.props.isShowingWithId;
-                const becameAbleToSave = this.props.canSave && !prevProps.canSave;
-                const becameShared = this.props.isShared && !prevProps.isShared;
-                if (showingSaveable && (becameAbleToSave || becameShared)) {
-                    this.props.onAutoUpdateProject();
-                }
+            }
+
+            // see if we should save/update the current project on the server
+            //
+            // don't try to save immediately after trying to save
+            if (prevProps.isUpdating) return;
+            // if we're newly able to save this project, save it!
+            const becameAbleToSave = this.props.canSave && !prevProps.canSave;
+            const becameShared = this.props.isShared && !prevProps.isShared;
+            if (this.props.isShowingSaveable && (becameAbleToSave || becameShared)) {
+                this.props.onAutoUpdateProject();
             }
         }
         componentWillUnmount () {
-            const showingSaveable = this.props.canSave && this.props.isShowingWithId;
-            if (showingSaveable) {
-                this.updateProjectToStorage();
+            this.clearAutoSaveTimeout();
+        }
+        clearAutoSaveTimeout () {
+            if (this.props.autoSaveTimeoutId !== null) {
+                clearTimeout(this.props.autoSaveTimeoutId);
+                this.props.setAutoSaveTimeoutId(null);
             }
         }
-        updateProjectToStorage () {
-            if (this.props.isManualUpdating) {
-                this.props.onShowSavingAlert();
+        scheduleAutoSave () {
+            if (this.props.isShowingSaveable && this.props.autoSaveTimeoutId === null) {
+                const timeoutId = setTimeout(this.tryToAutoSave,
+                    this.props.autosaveIntervalSecs * 1000);
+                this.props.setAutoSaveTimeoutId(timeoutId);
             }
+        }
+        tryToAutoSave () {
+            if (this.props.projectChanged && this.props.isShowingSaveable) {
+                this.props.onAutoUpdateProject();
+            }
+        }
+        isShowingCreatable (props) {
+            return props.canCreateNew && props.isShowingWithoutId;
+        }
+        updateProjectToStorage () {
+            this.props.onShowSavingAlert();
             return this.storeProject(this.props.reduxProjectId)
                 .then(() => {
-                    if (this.props.isManualUpdating) {
-                        this.props.onShowSaveSuccessAlert();
-                    }
-                    // there is nothing we expect to find in response that we need to check here
+                    // there's an http response object available here, but we don't need to examine
+                    // it, because there are no values contained in it that we care about
                     this.props.onUpdatedProject(this.props.loadingState);
+                    this.props.onShowSaveSuccessAlert();
                 })
                 .catch(err => {
-                    // NOTE: should throw up a notice for user
-                    this.props.onProjectError(`Saving the project failed with error: ${err}`);
+                    // Always show the savingError alert because it gives the
+                    // user the chance to download or retry the save manually.
+                    this.props.onShowAlert('savingError');
+                    this.props.onProjectError(err);
                 });
         }
         createNewProjectToStorage () {
             this.props.onShowCreatingAlert();
             return this.storeProject(null)
                 .then(response => {
-                    this.props.onShowCreateSuccessAlert();
                     this.props.onCreatedProject(response.id.toString(), this.props.loadingState);
+                    this.props.onShowCreateSuccessAlert();
                 })
                 .catch(err => {
-                    this.props.onProjectError(`Creating a new project failed with error: ${err}`);
+                    this.props.onShowAlert('creatingError');
+                    this.props.onProjectError(err);
                 });
         }
         createCopyToStorage () {
@@ -107,11 +144,12 @@ const ProjectSaverHOC = function (WrappedComponent) {
                 title: this.props.reduxProjectTitle
             })
                 .then(response => {
-                    this.props.onShowCreateSuccessAlert();
                     this.props.onCreatedProject(response.id.toString(), this.props.loadingState);
+                    this.props.onShowCreateSuccessAlert();
                 })
                 .catch(err => {
-                    this.props.onProjectError(`Creating a project copy failed with error: ${err}`);
+                    this.props.onShowAlert('creatingError');
+                    this.props.onProjectError(err);
                 });
         }
         createRemixToStorage () {
@@ -122,11 +160,12 @@ const ProjectSaverHOC = function (WrappedComponent) {
                 title: this.props.reduxProjectTitle
             })
                 .then(response => {
-                    this.props.onShowCreateSuccessAlert();
                     this.props.onCreatedProject(response.id.toString(), this.props.loadingState);
+                    this.props.onShowCreateSuccessAlert();
                 })
                 .catch(err => {
-                    this.props.onProjectError(`Remixing a project failed with error: ${err}`);
+                    this.props.onShowAlert('creatingError');
+                    this.props.onProjectError(err);
                 });
         }
         /**
@@ -136,34 +175,76 @@ const ProjectSaverHOC = function (WrappedComponent) {
          * @param {?object} requestParams - object of params to add to request body
          */
         storeProject (projectId, requestParams) {
-            return this.props.vm.saveProjectSb3()
-                .then(content => {
-                    const assetType = storage.AssetType.Project;
-                    const dataFormat = storage.DataFormat.SB3;
-                    const body = new FormData();
-                    body.append('sb3_file', content, 'sb3_file');
-                    if (requestParams) {
-                        for (const key in requestParams) {
-                            body.append(key, requestParams[key]);
-                        }
+            requestParams = requestParams || {};
+            this.clearAutoSaveTimeout();
+            return Promise.all(this.props.vm.assets
+                .filter(asset => !asset.clean)
+                .map(
+                    asset => storage.store(
+                        asset.assetType,
+                        asset.dataFormat,
+                        asset.data,
+                        asset.assetId
+                    ).then(
+                        () => (asset.clean = true)
+                    )
+                )
+            ).then(() => {
+                const body = new FormData();
+                const sb3Json = new Blob([this.props.vm.toJSON()], {type: 'application/json'});
+                body.append('sb3_file', sb3Json, 'sb3_file');
+                for (const key in requestParams) {
+                    if (requestParams.hasOwnProperty(key)) body.append(key, requestParams[key]);
+                }
+                return storage.store(
+                    storage.AssetType.Project,
+                    storage.DataFormat.JSON,
+                    body,
+                    projectId
+                );
+            })
+                .then(response => {
+                    this.props.onSetProjectUnchanged();
+                    const id = response.id.toString();
+                    if (id && this.props.onUpdateProjectThumbnail) {
+                        this.storeProjectThumbnail(id);
                     }
-                    // when id is undefined or null, storage.store as we have
-                    // configured it will create a new project with id
-                    return storage.store(
-                        assetType,
-                        dataFormat,
-                        body,
-                        projectId
-                    );
+                    return response;
+                })
+                .catch(err => {
+                    log.error(err);
+                    throw err; // pass the error up the chain
                 });
         }
+
+        /**
+         * Store a snapshot of the project once it has been saved/created.
+         * Needs to happen _after_ save because the project must have an ID.
+         * @param {!string} projectId - id of the project, must be defined.
+         */
+        storeProjectThumbnail (projectId) {
+            try {
+                this.props.vm.renderer.requestSnapshot(dataURI => {
+                    this.props.onUpdateProjectThumbnail(
+                        projectId, dataURItoBlob(dataURI));
+                });
+            } catch (e) {
+                log.error('Project thumbnail save error', e);
+                // This is intentionally fire/forget because a failure
+                // to save the thumbnail is not vitally important to the user.
+            }
+        }
+
         render () {
             const {
                 /* eslint-disable no-unused-vars */
+                autosaveIntervalSecs,
                 isCreatingCopy,
                 isCreatingNew,
+                projectChanged,
                 isManualUpdating,
                 isRemixing,
+                isShowingSaveable,
                 isShowingWithId,
                 isShowingWithoutId,
                 isUpdating,
@@ -171,15 +252,17 @@ const ProjectSaverHOC = function (WrappedComponent) {
                 onAutoUpdateProject,
                 onCreatedProject,
                 onCreateProject,
-                onManualUpdateProject,
                 onProjectError,
+                onShowAlert,
                 onShowCreateSuccessAlert,
                 onShowCreatingAlert,
                 onShowSaveSuccessAlert,
                 onShowSavingAlert,
                 onUpdatedProject,
+                onUpdateProjectThumbnail,
                 reduxProjectId,
                 reduxProjectTitle,
+                setAutoSaveTimeoutId: setAutoSaveTimeoutIdProp,
                 /* eslint-enable no-unused-vars */
                 ...componentProps
             } = this.props;
@@ -192,6 +275,7 @@ const ProjectSaverHOC = function (WrappedComponent) {
     }
 
     ProjectSaverComponent.propTypes = {
+        autoSaveTimeoutId: PropTypes.number,
         canCreateNew: PropTypes.bool,
         canSave: PropTypes.bool,
         isCreatingCopy: PropTypes.bool,
@@ -199,6 +283,7 @@ const ProjectSaverHOC = function (WrappedComponent) {
         isManualUpdating: PropTypes.bool,
         isRemixing: PropTypes.bool,
         isShared: PropTypes.bool,
+        isShowingSaveable: PropTypes.bool,
         isShowingWithId: PropTypes.bool,
         isShowingWithoutId: PropTypes.bool,
         isUpdating: PropTypes.bool,
@@ -206,28 +291,37 @@ const ProjectSaverHOC = function (WrappedComponent) {
         onAutoUpdateProject: PropTypes.func,
         onCreateProject: PropTypes.func,
         onCreatedProject: PropTypes.func,
-        onManualUpdateProject: PropTypes.func,
         onProjectError: PropTypes.func,
+        onShowAlert: PropTypes.func,
         onShowCreateSuccessAlert: PropTypes.func,
         onShowCreatingAlert: PropTypes.func,
         onShowSaveSuccessAlert: PropTypes.func,
         onShowSavingAlert: PropTypes.func,
+        onUpdateProjectThumbnail: PropTypes.func,
         onUpdatedProject: PropTypes.func,
+        projectChanged: PropTypes.bool,
         reduxProjectId: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
         reduxProjectTitle: PropTypes.string,
         vm: PropTypes.instanceOf(VM).isRequired
     };
-    const mapStateToProps = state => {
+    ProjectSaverComponent.defaultProps = {
+        autosaveIntervalSecs: 120
+    };
+    const mapStateToProps = (state, ownProps) => {
         const loadingState = state.scratchGui.projectState.loadingState;
+        const isShowingWithId = getIsShowingWithId(loadingState);
         return {
+            autoSaveTimeoutId: state.scratchGui.timeout.autoSaveTimeoutId,
             isCreatingCopy: getIsCreatingCopy(loadingState),
             isCreatingNew: getIsCreatingNew(loadingState),
             isRemixing: getIsRemixing(loadingState),
-            isShowingWithId: getIsShowingWithId(loadingState),
+            isShowingSaveable: ownProps.canSave && isShowingWithId,
+            isShowingWithId: isShowingWithId,
             isShowingWithoutId: getIsShowingWithoutId(loadingState),
             isUpdating: getIsUpdating(loadingState),
             isManualUpdating: getIsManualUpdating(loadingState),
             loadingState: loadingState,
+            projectChanged: state.scratchGui.projectChanged,
             reduxProjectId: state.scratchGui.projectState.projectId,
             reduxProjectTitle: state.scratchGui.projectTitle,
             vm: state.scratchGui.vm
@@ -237,13 +331,15 @@ const ProjectSaverHOC = function (WrappedComponent) {
         onAutoUpdateProject: () => dispatch(autoUpdateProject()),
         onCreatedProject: (projectId, loadingState) => dispatch(doneCreatingProject(projectId, loadingState)),
         onCreateProject: () => dispatch(createProject()),
-        onManualUpdateProject: () => dispatch(manualUpdateProject()),
         onProjectError: error => dispatch(projectError(error)),
-        onShowCreateSuccessAlert: () => dispatch(showStandardAlert('createSuccess')),
-        onShowCreatingAlert: () => dispatch(showStandardAlert('creating')),
-        onShowSaveSuccessAlert: () => dispatch(showStandardAlert('saveSuccess')),
-        onShowSavingAlert: () => dispatch(showStandardAlert('saving')),
-        onUpdatedProject: (projectId, loadingState) => dispatch(doneUpdatingProject(projectId, loadingState))
+        onSetProjectUnchanged: () => dispatch(setProjectUnchanged()),
+        onShowAlert: alertType => dispatch(showStandardAlert(alertType)),
+        onShowCreateSuccessAlert: () => showAlertWithTimeout(dispatch, 'createSuccess'),
+        onShowCreatingAlert: () => showAlertWithTimeout(dispatch, 'creating'),
+        onShowSaveSuccessAlert: () => showAlertWithTimeout(dispatch, 'saveSuccess'),
+        onShowSavingAlert: () => showAlertWithTimeout(dispatch, 'saving'),
+        onUpdatedProject: (projectId, loadingState) => dispatch(doneUpdatingProject(projectId, loadingState)),
+        setAutoSaveTimeoutId: id => dispatch(setAutoSaveTimeoutId(id))
     });
     // Allow incoming props to override redux-provided props. Used to mock in tests.
     const mergeProps = (stateProps, dispatchProps, ownProps) => Object.assign(
